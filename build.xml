@@ -1,0 +1,404 @@
+<?xml version="1.0"?>
+<project default="build-war">
+    <path id="class.path">
+        <fileset dir="${basedir}/webapp/WEB-INF/lib/">
+            <include name="**/*.jar"/>
+        </fileset>
+        <fileset dir="${basedir}/lib">
+            <include name="**/*.jar"/>
+        </fileset>
+    </path>
+
+    <target name="tests">
+        <javac classpathref="class.path" srcdir="${basedir}/tests" destdir="${basedir}/bin" debug="on"
+               debuglevel="lines,vars,source" includeantruntime="false">
+            <classpath>
+                <pathelement location="${basedir}/webapp/WEB-INF/lib/junit-4.8.2.jar"/>
+                <pathelement location="${basedir}/bin"/>
+            </classpath>
+        </javac>
+        <copy todir="${basedir}/bin">
+            <fileset dir="${basedir}/tests">
+                <exclude name="**/*.java"/>
+            </fileset>
+        </copy>
+        <mkdir dir="${basedir}/test-output"/>
+        <junit printsummary="yes" haltonfailure="no">
+            <classpath>
+                <pathelement location="${basedir}/bin"/>
+                <fileset dir="${basedir}/webapp/WEB-INF/lib">
+                    <include name="**/*.jar"/>
+                </fileset>
+            </classpath>
+
+            <batchtest todir="${basedir}/test-output">
+                <formatter type="xml"/>
+                <fileset dir="${basedir}/tests">
+                    <include name="**/Test*.java"/>
+                </fileset>
+            </batchtest>
+        </junit>
+    </target>
+
+    <target name="build-version-xml">
+        <echo>building svn version info xml file...</echo>
+        <exec executable="svn" output="${basedir}/webapp/WEB-INF/classes/com/cengage/geyser/webapp/svninfo.xml">
+            <arg value="info"/>
+            <arg value="--xml"/>
+        </exec>
+        <echo>svn version info xml file built</echo>
+    </target>
+
+    <!-- Compile, build JARs & WARs -->
+    <target name="build-war">
+        <mkdir dir="${basedir}/bin"/>
+
+        <javac classpathref="class.path" srcdir="${basedir}/src:${basedir}/gshell:${basedir}/tests"
+               destdir="${basedir}/bin" debug="on" debuglevel="lines,vars,source" includeantruntime="false"
+               encoding="UTF-8"/>
+
+        <copy toDir="${basedir}/bin">
+            <fileset dir="${basedir}/src" excludes="**/*.java"/>
+        </copy>
+
+        <copy toDir="${basedir}/bin">
+            <fileset dir="${basedir}/tests" excludes="**/*.java"/>
+        </copy>
+
+        <!-- Moving the code to WEB-INF/classes instead of geyserizer.jar -->
+        <copy toDir="${basedir}/webapp/WEB-INF/classes/">
+            <fileset dir="${basedir}/bin"/>
+        </copy>
+
+        <antcall target="build-version-xml"/>
+
+        <!-- Package the JAR and the rest of the webapp into a WAR -->
+        <jar destfile="${basedir}/geyserizer.war" basedir="${basedir}/webapp">
+            <manifest>
+                <attribute name="Built-By" value="Mark Lipson"/>
+            </manifest>
+        </jar>
+    </target>
+
+    <!-- Deploy the web application to Tomcat (requires account and installation of ssh public key) -->
+    <target name="deploy">
+        <echo>building</echo>
+        <antcall target="build-war"/>
+        <!-- upload WAR file onto the server -->
+        <echo>*** uploading war file to home folder </echo>
+        <exec executable="scp">
+            <arg value="${basedir}/geyserizer.war"/>
+            <arg value="${targetUser}@${targetHost}:/home/${targetUser}/"/>
+        </exec>
+
+        <echo>*** stopping tomcat</echo>
+        <exec executable="ssh">
+            <arg value="${targetUser}@${targetHost}"/>
+            <arg value="${targetFolder}/../bin/shutdown.sh"/>
+        </exec>
+
+        <!-- update webapps with new WAR file -->
+        <echo>*** updating war file</echo>
+        <exec executable="ssh">
+            <arg value="${targetUser}@${targetHost}"/>
+            <arg value="cp geyserizer.war ${targetFolder}"/>
+        </exec>
+
+        <!-- delete 'geyserizer' exploded directory from webapps folder -->
+        <echo>*** deleting exploded 'geyserizer' folder @ ${targetHost}:${targetFolder}</echo>
+        <exec executable="ssh">
+            <arg value="${targetUser}@${targetHost}"/>
+            <arg value="rm -rf ${targetFolder}/geyserizer"/>
+        </exec>
+
+        <!-- unpack 'geyserizer.war' into webapps folder -->
+        <echo>*** unpacking 'geyserizer.war' into @ ${targetHost}:${targetFolder}</echo>
+        <exec executable="ssh">
+            <arg value="${targetUser}@${targetHost}"/>
+            <arg value="unzip -q ${targetFolder}/geyserizer.war -d ${targetFolder}/geyserizer"/>
+        </exec>
+
+        <!-- update the shared configuration file (all instances also have their own unique configuration files) -->
+        <exec executable="scp">
+            <arg value="${basedir}/geyserizer.common.props"/>
+            <arg value="${targetUser}@${targetHost}:/home/${targetUser}/geyserizer/config/"/>
+        </exec>
+
+        <!-- then restart Tomcat -->
+        <echo>*** starting tomcat</echo>
+        <exec executable="ssh">
+            <arg value="${targetUser}@${targetHost}"/>
+            <arg value="${targetFolder}/../bin/startup.sh"/>
+        </exec>
+        <!-- give Tomcat a chance to start up and unpack the WAR file -->
+        <sleep seconds="30"/>
+        <!-- verify it is working -->
+        <echo>*** verifying</echo>
+        <exec executable="wget">
+            <arg value="-q"/>
+            <arg value="-O"/>
+            <arg value="${basedir}/ping.status"/>
+            <arg value="http://${targetHost}:8080/geyserizer/service/ping.jsp"/>
+        </exec>
+        <delete file="${basedir}/ping.status"/>
+    </target>
+
+    <target name="deploy-new-schemas">
+        <echo>Sending new cendoc schema</echo>
+        <exec executable="scp">
+            <arg value="-r"/>
+            <arg value="${basedir}/webapp/schema"/>
+            <arg value="${targetUser}@${targetHost}:${targetFolder}/geyserizer/"/>
+        </exec>
+    </target>
+
+    <!-- Build targets for each specific platform -->
+    <target name="deploy-delmardev" depends="build-war">
+        <echo>Building and deploying LOCAL DEVELOPMENT version</echo>
+        <!-- <antcall target="build-war"/> -->
+        <!-- Deploy the web application to the local Tomcat server -->
+        <exec executable="service">
+            <arg value="tomcat6"/>
+            <arg value="restart"/>
+        </exec>
+        <delete dir="/var/lib/tomcat6/webapps/geyserizer"/>
+        <delete file="/var/lib/tomcat6/webapps/geyserizer.war"/>
+        <copy todir="/var/lib/tomcat6/webapps/" file="${basedir}/geyserizer.war"/>
+    </target>
+
+    <target name="deploy-mark">
+        <echo>Building and deploying LOCAL DEVELOPMENT version</echo>
+        <antcall target="build-war"/>
+        <!-- Deploy the web application to the local Tomcat server -->
+        <copy todir="/Applications/Tomcat/webapps/" file="${basedir}/geyserizer.war"/>
+        <copy todir="${user.home}/geyserizer/config" file="${basedir}/geyserizer.common.props"/>
+    </target>
+    <target name="deploy-prod">
+        <echo>Building and deploying to **geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+    <target name="deploy-new-prod">
+        <echo>Building and deploying to **geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="10.160.147.150"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+
+    <target name="deploy-preprod">
+        <echo>Building and deploying to **preprod.geyserizer.cl-cms.com*</echo>
+        <antcall target="deploy">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="preprod.geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+    <target name="deploy-qa">
+        <echo>Building and deploying to **qa.geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="qa.geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+    <target name="deploy-dev">
+        <echo>Building and deploying to **dev.geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="dev.geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+
+    <target name="deploy-schema-dev">
+        <echo>preparing to deploy new schema to **dev.geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy-new-schemas">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="dev.geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+
+    <target name="deploy-schema-qa">
+        <echo>preparing to deploy new schema to **qa.geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy-new-schemas">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="qa.geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+
+    <target name="deploy-schema-prod">
+        <echo>preparing to deploy new schema to **geyserizer.cl-cms.com**</echo>
+        <antcall target="deploy-new-schemas">
+            <param name="targetUser" value="geyser"/>
+            <param name="targetHost" value="geyserizer.cl-cms.com"/>
+            <param name="targetFolder" value="/home/geyser/tomcat/webapps"/>
+        </antcall>
+    </target>
+
+    <target name="build-standalone-uploader">
+        <echo>Building Standalone Content Uploader Application</echo>
+        <jar destfile="${basedir}/distrib/uploader/uploader.jar" basedir="${basedir}/bin">
+            <manifest>
+                <attribute name="Built-By" value="${user.name}"/>
+                <attribute name="Main-Class" value="com.cengage.uploader.Uploader"/>
+                <attribute name="Class-Path" value="marklogic-xcc-6.0.3.jar"/>
+            </manifest>
+            <include name="com/cengage/uploader/*"/>
+        </jar>
+        <copy overwrite="true" file="${basedir}/lib/marklogic-xcc-6.0.3.jar" tofile="${basedir}/distrib/uploader/marklogic-xcc-6.0.3.jar"/>
+        <zip destfile="${basedir}/distrib/uploader/uploader.zip" basedir="${basedir}/distrib/uploader">
+            <include name="uploader.jar"/>
+            <include name="marklogic-xcc-6.0.3.jar"/>
+        </zip>
+    </target>
+
+    <target name="code-updater">
+        <echo>Building CodeUpdater JAR file</echo>
+        <jar destfile="${basedir}/distrib/code-updater/code-updater.jar" basedir="${basedir}/bin">
+            <manifest>
+                <attribute name="Built-By" value="${user.name}"/>
+                <attribute name="Main-Class" value="com.cengage.geyser.codeupdater.CodeUpdater"/>
+                <attribute name="Class-Path" value="marklogic-xcc-6.0.3.jar"/>
+            </manifest>
+            <include name="com/cengage/geyser/codeupdater/*"/>
+            <include name="com/cengage/geyser/common/*"/>
+        </jar>
+        <copy overwrite="true" file="${basedir}/lib/marklogic-xcc-6.0.3.jar"
+              tofile="${basedir}/distrib/code-updater/marklogic-xcc-6.0.3.jar"/>
+        <zip destfile="${basedir}/distrib/code-updater/code-updater.zip" basedir="${basedir}/distrib/code-updater">
+            <include name="code-updater.jar"/>
+            <include name="marklogic-xcc-6.0.3.jar"/>
+            <include name="deploy-example.sh"/>
+            <include name="example.props"/>
+        </zip>
+    </target>
+
+    <target name="standalone-tools">
+        <javac classpathref="class.path" srcdir="${basedir}/src:${basedir}/tests"
+               destdir="${basedir}/bin" debug="on" debuglevel="lines,vars,source" includeantruntime="false"/>
+        <jar destfile="${basedir}/distrib/misc-tools/find-missing-assets.jar" basedir="${basedir}/bin">
+            <manifest>
+                <attribute name="Built-By" value="${user.name}"/>
+                <attribute name="Main-Class" value="com.cengage.geyser.tools.FindMissingAssets"/>
+                <attribute name="Class-Path" value="marklogic-xcc-6.0.3.jar"/>
+            </manifest>
+            <include name="com/cengage/geyser/tools/ToolBase.class"/>
+            <include name="com/cengage/geyser/tools/FindMissingAssets.class"/>
+        </jar>
+        <copy overwrite="true" file="${basedir}/lib/marklogic-xcc-6.0.3.jar"
+              tofile="${basedir}/distrib/misc-tools/marklogic-xcc-6.0.3.jar"/>
+        <jar destfile="${basedir}/distrib/misc-tools/proxy-tracker.jar" basedir="${basedir}/bin">
+            <manifest>
+                <attribute name="Built-By" value="${user.name}"/>
+                <attribute name="Main-Class" value="com.cengage.proxytracker.ProxyTracker"/>
+            </manifest>
+            <include name="com/cengage/proxytracker/*"/>
+            <exclude name="com/cengage/proxytracker/tests/*"/>
+        </jar>
+        <jar destfile="${basedir}/distrib/misc-tools/apache-log-scanner.jar" basedir="${basedir}/bin">
+            <manifest>
+                <attribute name="Built-By" value="${user.name}"/>
+                <attribute name="Main-Class" value="com.cengage.geyser.tools.ApacheLogScanner"/>
+            </manifest>
+            <include name="com/cengage/geyser/tools/ApacheLogScanner*.class"/>
+        </jar>
+        <jar destfile="${basedir}/distrib/misc-tools/asset-size-fix.jar" basedir="${basedir}/bin">
+            <manifest>
+                <attribute name="Built-By" value="${user.name}"/>
+                <attribute name="Main-Class" value="com.cengage.geyser.tools.AssetSizeFix"/>
+                <attribute name="Class-Path" value="marklogic-xcc-6.0.3.jar"/>
+            </manifest>
+            <include name="com/cengage/geyser/tools/AssetSizeFix*.class"/>
+        </jar>
+    </target>
+
+    <!-- Jenkins calls this target
+       parameter: version.num - SVN revision number
+       parameter: deploy.target - which server to deploy to (dev, preprod, qa, prod)
+      -->
+    <target name="jenkins-build" depends="build-war">
+        <echo file="${basedir}/bin/com/cengage/geyser/webapp/revision.txt" message="r${version.num}"/>
+        <antcall target="tests"/>
+        <antcall target="build-war"/>
+        <antcall target="deploy-${deploy.target}"/>
+    </target>
+
+    <!--
+      Target to copy erroneous zero byte asset files in production from pre-prod.
+    -->
+    <target name="zero-byte-asset-copier" depends="build-war" description="Copies Zero asset bytes from pre-prod to prod">
+        <!-- property name="database" value="NBCendocJune | chem" -->
+        <property name="database" value="NBCendocJune" />
+        <property name="user@server" value="geyser@geyserizer.cl-cms.com"/>
+        <property name="reportFile" value="/tmp/report.txt"/>
+        <property name="assetZipFile" value="/tmp/assets.zip"/>
+
+        <echo>${user@server}</echo>
+        <echo>${reportFile}</echo>
+        <echo>${assetZipFile}</echo>
+
+        <!-- Prepare zero byte asset list             -->
+        <echo>Searching for zero byte files in production in database ${database}...</echo>
+        <exec executable="ssh">
+            <arg value="${user@server}" />
+            <arg value="find /mnt/geyser_hotfolder/${database}/assets/cendoc-*/ -type f -size 0 -printf  '%p\n' | sort -r > ${reportFile}" />
+        </exec>
+        <!-- Copy the zero byte report to local       -->
+        <echo>Copying zero assets file list from production to local @ ${reportFile} </echo>
+        <exec executable="scp">
+            <arg value="${user@server}:${reportFile}" />
+            <arg value="${reportFile}" />
+        </exec>
+
+        <!-- Prepare a zip of all the zero byte file  -->
+        <echo>Preparing zip of non-zero assets from pre-prod ...</echo>
+        <java classname="com.cengage.geyser.webapp.util.AssetCopier">
+            <arg line="Prod ${reportFile} ${assetZipFile}" />
+            <classpath>
+                <pathelement path="${basedir}/bin" />
+                <fileset dir="${basedir}/webapp/WEB-INF/lib/">
+                    <include name="**/*.jar" />
+                </fileset>
+                <fileset dir="${basedir}/lib">
+                    <include name="**/*.jar" />
+                </fileset>
+            </classpath>
+        </java>
+
+        <!-- Copy the zip file to prod server  & unzip   -->
+        <echo>Copying assets.zip to production server @ ${assetZipFile} ...</echo>
+        <exec executable="scp">
+            <arg value="${assetZipFile}" />
+            <arg value="${user@server}:${assetZipFile}" />
+        </exec>
+
+        <!-- Unzip the files to prod server !!!!!  -->
+        <echo>Unpacking the assets to production server </echo>
+        <exec executable="ssh">
+            <arg value="${user@server}" />
+            <arg value="unzip -o -q ${assetZipFile} -d /tmp/mnt/geyser_hotfolder/" />
+        </exec>
+
+
+    </target>
+
+    <target name="stone-build-and-deploy" description="build and deploy to Stone's local">
+        <property name="stone-webapps" value="/home/martin/Cengage/eclipse-workspace/.metadata/.plugins/org.eclipse.wst.server.core/tmp0/webapps"/>
+        <property name="stone-project" value="geyserizer"/>
+        <echo>Shutting down the servlet...</echo>
+        <delete file="${stone-webapps}/${stone-project}.war"/>
+        <delete dir="${stone-webapps}/${stone-project}"/>
+        <echo>Building ${stone-project}...</echo>
+        <antcall target="build-war"/>
+        <echo>Deploying...</echo>
+        <copy todir="${user.home}/${stone-project}/config" file="${basedir}/geyserizer.common.props"/>
+        <copy todir="${stone-webapps}" file="${basedir}/geyserizer.war"/>
+    </target>
+</project>
